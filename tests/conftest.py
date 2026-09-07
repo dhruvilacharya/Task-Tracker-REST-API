@@ -31,7 +31,6 @@ os.environ.setdefault(
 
 import pytest
 import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -39,7 +38,6 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.database import Base, get_db
-
 
 # ---------------------------------------------------------------------------
 # Per-test async engine + session (file-based SQLite for isolation)

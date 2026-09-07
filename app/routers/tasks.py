@@ -16,6 +16,7 @@ from fastapi import status as http_status
 
 from app.dependencies import get_task_service
 from app.schemas.task import (
+    PaginatedResponse,
     SortBy,
     SortOrder,
     TaskCreate,
@@ -37,23 +38,28 @@ async def create_task(
     return TaskOut.model_validate(row)
 
 
-@router.get("", response_model=list[TaskOut])
+@router.get("", response_model=PaginatedResponse[TaskOut])
 async def list_tasks(
     status: TaskStatus | None = Query(default=None),
     due_before: date | None = Query(default=None),
     due_after: date | None = Query(default=None),
     sort_by: SortBy = Query(default="created_at"),
     sort_order: SortOrder = Query(default="desc"),
+    page: int = Query(default=1, ge=1, description="Page number (1-indexed)"),
+    page_size: int = Query(
+        default=20, ge=1, le=100, description="Items per page (max 100)"
+    ),
     svc: TaskService = Depends(get_task_service),
-) -> list[TaskOut]:
-    rows = await svc.list_tasks(
+) -> PaginatedResponse[TaskOut]:
+    return await svc.list_tasks_paginated(
         status=status,
         due_before=due_before,
         due_after=due_after,
         sort_by=sort_by,
         sort_order=sort_order,
+        page=page,
+        page_size=page_size,
     )
-    return [TaskOut.model_validate(row) for row in rows]
 
 
 @router.get("/{task_id}", response_model=TaskOut)

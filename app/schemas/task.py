@@ -1,6 +1,7 @@
+import math
 from datetime import date, datetime
 from enum import Enum
-from typing import Annotated, Literal
+from typing import Annotated, Generic, Literal, TypeVar
 
 from pydantic import BaseModel, Field, StringConstraints
 
@@ -41,3 +42,37 @@ class TaskOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     version: int
+
+
+# ---------------------------------------------------------------------------
+# Pagination
+# ---------------------------------------------------------------------------
+
+T = TypeVar("T")
+
+
+class PaginatedResponse(BaseModel, Generic[T]):
+    """Generic paginated envelope used by list endpoints."""
+
+    items: list[T]
+    total: int = Field(description="Total number of matching records")
+    page: int = Field(description="Current page number (1-indexed)")
+    page_size: int = Field(description="Number of items per page")
+    pages: int = Field(description="Total number of pages")
+
+    @classmethod
+    def build(
+        cls,
+        items: list[T],
+        total: int,
+        page: int,
+        page_size: int,
+    ) -> "PaginatedResponse[T]":
+        pages = math.ceil(total / page_size) if page_size > 0 else 0
+        return cls(
+            items=items,
+            total=total,
+            page=page,
+            page_size=page_size,
+            pages=pages,
+        )

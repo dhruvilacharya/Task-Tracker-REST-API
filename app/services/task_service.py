@@ -5,10 +5,12 @@ Rules for this layer:
   - No SQL / SQLAlchemy imports — all DB work goes through TaskRepository.
   - Translates repository sentinels into HTTPExceptions so the router stays
     thin (HTTP status codes only, zero business logic).
+  - Every operation is scoped to a user_id: users can only see and mutate
+    their own tasks. A task belonging to another user is indistinguishable
+    from a nonexistent one at this layer (returns 404), which avoids leaking
+    the existence of other users' tasks.
   - Accepts a TaskRepository instance (constructor injection) so unit tests
     can swap in a mock without touching the DB.
-  - Future home for: status-transition state machine (Phase 5), audit
-    dispatch (Phase 6), and any other cross-cutting task logic.
 """
 
 from __future__ import annotations
@@ -27,47 +29,57 @@ from app.schemas.task import PaginatedResponse, TaskOut
 
 
 class TaskService:
-    """
-    Orchestrates task operations.
-
-    Instantiate with a TaskRepository; call methods to perform operations.
-    All methods raise HTTPException on error so the router never needs to
-    inspect return values for sentinel strings.
-    """
-
     def __init__(self, repo: TaskRepository) -> None:
         self._repo = repo
+
+    # ------------------------------------------------------------------
+    # Ownership helper
+    # ------------------------------------------------------------------
+
+    async def _raise_for_access(self, task_id: int, *, user_id: int) -> None:
+        """
+        Raise the correct error when a task is not accessible to user_id.
+
+        - 404 if the task doesn't exist at all
+        - 403 if it exists but is owned by another user
+        """
+        owner_id = await self._repo.get_owner_id(task_id)
+        if owner_id is None:
+            raise HTTPException(
+                status_code=http_status.HTTP_404_NOT_FOUND,
+                detail=f"Task with id {task_id} not found",
+            )
+        if owner_id != user_id:
+            raise HTTPException(
+                status_code=http_status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to access this task",
+            )
 
     # ------------------------------------------------------------------
     # Reads
     # ------------------------------------------------------------------
 
-    async def get_task(self, task_id: int) -> dict:
-        """Return a task by id. Raises 404 if not found."""
-        row = await self._repo.get_by_id(task_id)
+    async def get_task(self, task_id: int, *, user_id: int) -> dict:
+        """Return one of user_id's tasks. 404 if missing, 403 if owned by another."""
+        row = await self._repo.get_by_id(task_id, user_id=user_id)
         if row is None:
-            raise HTTPException(
-                status_code=http_status.HTTP_404_NOT_FOUND,
-                detail=f"Task with id {task_id} not found",
-            )
-        return row
+            await self._raise_for_access(task_id, user_id=user_id)
+        return row  # type: ignore[return-value]
 
     async def list_tasks(
         self,
         *,
+        user_id: int,
         status: str | None = None,
         due_before: date | None = None,
         due_after: date | None = None,
         sort_by: str = "created_at",
         sort_order: str = "desc",
     ) -> list[dict]:
-        """
-        Return all matching tasks (unpaginated).
-
-        Kept for internal use; the paginated variant is preferred for HTTP.
-        """
+        """Return all of user_id's matching tasks (unpaginated)."""
         try:
             return await self._repo.get_all(
+                user_id=user_id,
                 status=status,
                 due_before=due_before,
                 due_after=due_after,
@@ -83,6 +95,7 @@ class TaskService:
     async def list_tasks_paginated(
         self,
         *,
+        user_id: int,
         status: str | None = None,
         due_before: date | None = None,
         due_after: date | None = None,
@@ -91,14 +104,9 @@ class TaskService:
         page: int = 1,
         page_size: int = 20,
     ) -> PaginatedResponse[TaskOut]:
-        """
-        Return a paginated envelope of tasks matching the given filters.
-
-        Issues count_all + get_all_paginated against the same filter set,
-        then assembles PaginatedResponse via its build() classmethod so
-        page-count arithmetic stays in the schema layer.
-        """
+        """Return a paginated envelope of user_id's matching tasks."""
         filter_kwargs: dict = {
+            "user_id": user_id,
             "status": status,
             "due_before": due_before,
             "due_after": due_after,
@@ -130,28 +138,31 @@ class TaskService:
     # Writes
     # ------------------------------------------------------------------
 
-    async def create_task(self, data: dict) -> dict:
-        """Create and return a new task."""
-        return await self._repo.create(data)
+    async def create_task(self, data: dict, *, user_id: int) -> dict:
+        """Create and return a new task owned by user_id."""
+        return await self._repo.create(data, user_id=user_id)
 
     async def update_task(
         self,
         task_id: int,
         data: dict,
         version: int,
+        *,
+        user_id: int,
     ) -> dict:
         """
-        Apply an optimistic-locking update.
+        Apply an optimistic-locking update to one of user_id's tasks.
 
-        Raises 404 if the task doesn't exist, 409 on a version conflict.
+        Raises 404 if the task doesn't exist for this user, 409 on version conflict.
         """
-        result = await self._repo.update_raw(task_id, data, version)
+        result = await self._repo.update_raw(
+            task_id, data, version, user_id=user_id
+        )
 
         if result == NOT_FOUND:
-            raise HTTPException(
-                status_code=http_status.HTTP_404_NOT_FOUND,
-                detail=f"Task with id {task_id} not found",
-            )
+            # Not in this user's scope — distinguish 404 (no such task) from
+            # 403 (task owned by another user).
+            await self._raise_for_access(task_id, user_id=user_id)
         if result == VERSION_CONFLICT:
             raise HTTPException(
                 status_code=http_status.HTTP_409_CONFLICT,
@@ -159,12 +170,9 @@ class TaskService:
             )
         return result  # type: ignore[return-value]  # dict at this point
 
-    async def delete_task(self, task_id: int) -> None:
-        """Delete a task by id. Raises 404 if the task doesn't exist."""
-        row = await self._repo.get_by_id(task_id)
+    async def delete_task(self, task_id: int, *, user_id: int) -> None:
+        """Delete one of user_id's tasks. 404 if missing, 403 if owned by another."""
+        row = await self._repo.get_by_id(task_id, user_id=user_id)
         if row is None:
-            raise HTTPException(
-                status_code=http_status.HTTP_404_NOT_FOUND,
-                detail=f"Task with id {task_id} not found",
-            )
-        await self._repo.delete(task_id)
+            await self._raise_for_access(task_id, user_id=user_id)
+        await self._repo.delete(task_id, user_id=user_id)

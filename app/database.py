@@ -65,5 +65,5 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 # init_db — kept as a shim; real schema management lives in Alembic
 # ---------------------------------------------------------------------------
 
-async def init_db() -> None:  # noqa: RUF029
+async def init_db() -> None:
     """No-op shim. Schema is managed by Alembic migrations."""

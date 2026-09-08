@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     # Application
     APP_TITLE: str = "Task Tracker REST API"
 
+    # JWT — override SECRET_KEY in production via environment variable
+    SECRET_KEY: str = "change-me-in-production-use-a-long-random-string"
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

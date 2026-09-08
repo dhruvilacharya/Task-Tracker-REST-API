@@ -2,9 +2,10 @@
 Task router — HTTP concerns only.
 
 Each handler:
-  1. Receives validated input from FastAPI (Pydantic schemas, query params).
-  2. Calls the TaskService method.
-  3. Returns the response model.
+  1. Requires an authenticated user (get_current_user dependency).
+  2. Receives validated input from FastAPI (Pydantic schemas, query params).
+  3. Calls the TaskService method, scoped to current_user.id.
+  4. Returns the response model.
 
 No SQL, no sentinel inspection, no business logic lives here.
 """
@@ -14,7 +15,8 @@ from datetime import date
 from fastapi import APIRouter, Depends, Query, Response
 from fastapi import status as http_status
 
-from app.dependencies import get_task_service
+from app.dependencies import get_current_user, get_task_service
+from app.models.orm import User
 from app.schemas.task import (
     PaginatedResponse,
     SortBy,
@@ -33,8 +35,9 @@ router = APIRouter()
 async def create_task(
     payload: TaskCreate,
     svc: TaskService = Depends(get_task_service),
+    current_user: User = Depends(get_current_user),
 ) -> TaskOut:
-    row = await svc.create_task(payload.model_dump())
+    row = await svc.create_task(payload.model_dump(), user_id=current_user.id)
     return TaskOut.model_validate(row)
 
 
@@ -50,8 +53,10 @@ async def list_tasks(
         default=20, ge=1, le=100, description="Items per page (max 100)"
     ),
     svc: TaskService = Depends(get_task_service),
+    current_user: User = Depends(get_current_user),
 ) -> PaginatedResponse[TaskOut]:
     return await svc.list_tasks_paginated(
+        user_id=current_user.id,
         status=status,
         due_before=due_before,
         due_after=due_after,
@@ -66,8 +71,9 @@ async def list_tasks(
 async def get_task(
     task_id: int,
     svc: TaskService = Depends(get_task_service),
+    current_user: User = Depends(get_current_user),
 ) -> TaskOut:
-    row = await svc.get_task(task_id)
+    row = await svc.get_task(task_id, user_id=current_user.id)
     return TaskOut.model_validate(row)
 
 
@@ -76,11 +82,13 @@ async def update_task(
     task_id: int,
     payload: TaskUpdate,
     svc: TaskService = Depends(get_task_service),
+    current_user: User = Depends(get_current_user),
 ) -> TaskOut:
     row = await svc.update_task(
         task_id,
         payload.model_dump(exclude_unset=True),
         payload.version,
+        user_id=current_user.id,
     )
     return TaskOut.model_validate(row)
 
@@ -89,6 +97,7 @@ async def update_task(
 async def delete_task(
     task_id: int,
     svc: TaskService = Depends(get_task_service),
+    current_user: User = Depends(get_current_user),
 ) -> Response:
-    await svc.delete_task(task_id)
+    await svc.delete_task(task_id, user_id=current_user.id)
     return Response(status_code=http_status.HTTP_204_NO_CONTENT)

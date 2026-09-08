@@ -42,6 +42,7 @@ class TaskOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     version: int
+    user_id: int
 
 
 # ---------------------------------------------------------------------------

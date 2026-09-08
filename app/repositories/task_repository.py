@@ -4,6 +4,8 @@ TaskRepository — thin async wrappers around SQLAlchemy queries.
 Rules for this layer:
   - No business logic, no HTTP concerns, no FastAPI imports.
   - Every method accepts an AsyncSession injected by the caller.
+  - All queries are scoped to a user_id so users only ever see/modify
+    their own tasks (ownership isolation at the data layer).
   - Sentinel values NOT_FOUND / VERSION_CONFLICT signal DB-level outcomes
     (row missing vs version mismatch) back to the service layer.
   - Filter / sort params are validated against whitelists before touching SQL
@@ -65,7 +67,7 @@ def _to_str(value) -> str | None:
 
 class TaskRepository:
     """
-    All database interactions for the tasks table.
+    All database interactions for the tasks table, scoped by user_id.
 
     Instantiate with an AsyncSession; the session lifecycle (commit / rollback)
     is managed by the ``get_db`` dependency in database.py — the repository
@@ -79,60 +81,37 @@ class TaskRepository:
     # Read
     # ------------------------------------------------------------------
 
-    async def get_by_id(self, task_id: int) -> dict | None:
-        """Return the task as a dict, or None if it doesn't exist."""
+    async def get_by_id(self, task_id: int, *, user_id: int) -> dict | None:
+        """Return the task as a dict if it belongs to user_id, else None."""
         result = await self._db.execute(
-            select(Task).where(Task.id == task_id)
+            select(Task).where(Task.id == task_id, Task.user_id == user_id)
         )
         task = result.scalar_one_or_none()
         return task.to_dict() if task is not None else None
 
-    async def get_all(
-        self,
-        *,
-        status: str | None = None,
-        due_before: date | None = None,
-        due_after: date | None = None,
-        sort_by: str = "created_at",
-        sort_order: str = "desc",
-    ) -> list[dict]:
+    async def get_owner_id(self, task_id: int) -> int | None:
         """
-        Return all tasks matching the given filters, in the requested order.
+        Return the user_id that owns task_id, regardless of scope.
 
-        sort_by and sort_order are validated against whitelists — unknown
-        values raise ValueError before any SQL is constructed.
+        Used by the service layer to distinguish 404 (no such task anywhere)
+        from 403 (task exists but belongs to another user).
         """
-        column_name = SORT_COLUMNS.get(sort_by)
-        if column_name is None:
-            raise ValueError(f"invalid sort_by: {sort_by!r}")
-        if sort_order not in SORT_ORDERS:
-            raise ValueError(f"invalid sort_order: {sort_order!r}")
-
-        stmt = select(Task)
-
-        if status is not None:
-            stmt = stmt.where(Task.status == _to_str(status))
-        if due_before is not None:
-            # due_date stored as TEXT "YYYY-MM-DD"; lexicographic ≤ works correctly
-            stmt = stmt.where(Task.due_date <= due_before.isoformat())
-        if due_after is not None:
-            stmt = stmt.where(Task.due_date >= due_after.isoformat())
-
-        col = getattr(Task, column_name)
-        stmt = stmt.order_by(col.asc() if sort_order == "asc" else col.desc())
-
-        result = await self._db.execute(stmt)
-        return [row.to_dict() for row in result.scalars().all()]
+        result = await self._db.execute(
+            select(Task.user_id).where(Task.id == task_id)
+        )
+        return result.scalar_one_or_none()
 
     def _apply_filters(
         self,
         stmt,
         *,
+        user_id: int,
         status: str | None,
         due_before: date | None,
         due_after: date | None,
     ):
-        """Apply the shared WHERE clauses used by both count_all and get_all_paginated."""
+        """Apply the ownership scope + shared WHERE clauses."""
+        stmt = stmt.where(Task.user_id == user_id)
         if status is not None:
             stmt = stmt.where(Task.status == _to_str(status))
         if due_before is not None:
@@ -141,38 +120,17 @@ class TaskRepository:
             stmt = stmt.where(Task.due_date >= due_after.isoformat())
         return stmt
 
-    async def count_all(
+    async def get_all(
         self,
         *,
-        status: str | None = None,
-        due_before: date | None = None,
-        due_after: date | None = None,
-    ) -> int:
-        """Return the total number of tasks matching the given filters."""
-        stmt = select(func.count()).select_from(Task)
-        stmt = self._apply_filters(
-            stmt, status=status, due_before=due_before, due_after=due_after
-        )
-        result = await self._db.execute(stmt)
-        return result.scalar_one()
-
-    async def get_all_paginated(
-        self,
-        *,
+        user_id: int,
         status: str | None = None,
         due_before: date | None = None,
         due_after: date | None = None,
         sort_by: str = "created_at",
         sort_order: str = "desc",
-        page: int = 1,
-        page_size: int = 20,
     ) -> list[dict]:
-        """
-        Return one page of tasks matching the given filters.
-
-        page is 1-indexed; page_size controls the LIMIT.
-        The same whitelist guards as get_all apply to sort_by / sort_order.
-        """
+        """Return all of user_id's tasks matching filters, in requested order."""
         column_name = SORT_COLUMNS.get(sort_by)
         if column_name is None:
             raise ValueError(f"invalid sort_by: {sort_by!r}")
@@ -181,7 +139,65 @@ class TaskRepository:
 
         stmt = select(Task)
         stmt = self._apply_filters(
-            stmt, status=status, due_before=due_before, due_after=due_after
+            stmt,
+            user_id=user_id,
+            status=status,
+            due_before=due_before,
+            due_after=due_after,
+        )
+
+        col = getattr(Task, column_name)
+        stmt = stmt.order_by(col.asc() if sort_order == "asc" else col.desc())
+
+        result = await self._db.execute(stmt)
+        return [row.to_dict() for row in result.scalars().all()]
+
+    async def count_all(
+        self,
+        *,
+        user_id: int,
+        status: str | None = None,
+        due_before: date | None = None,
+        due_after: date | None = None,
+    ) -> int:
+        """Count user_id's tasks matching the given filters."""
+        stmt = select(func.count()).select_from(Task)
+        stmt = self._apply_filters(
+            stmt,
+            user_id=user_id,
+            status=status,
+            due_before=due_before,
+            due_after=due_after,
+        )
+        result = await self._db.execute(stmt)
+        return result.scalar_one()
+
+    async def get_all_paginated(
+        self,
+        *,
+        user_id: int,
+        status: str | None = None,
+        due_before: date | None = None,
+        due_after: date | None = None,
+        sort_by: str = "created_at",
+        sort_order: str = "desc",
+        page: int = 1,
+        page_size: int = 20,
+    ) -> list[dict]:
+        """Return one page of user_id's tasks matching the given filters."""
+        column_name = SORT_COLUMNS.get(sort_by)
+        if column_name is None:
+            raise ValueError(f"invalid sort_by: {sort_by!r}")
+        if sort_order not in SORT_ORDERS:
+            raise ValueError(f"invalid sort_order: {sort_order!r}")
+
+        stmt = select(Task)
+        stmt = self._apply_filters(
+            stmt,
+            user_id=user_id,
+            status=status,
+            due_before=due_before,
+            due_after=due_after,
         )
 
         col = getattr(Task, column_name)
@@ -197,8 +213,8 @@ class TaskRepository:
     # Write
     # ------------------------------------------------------------------
 
-    async def create(self, data: dict) -> dict:
-        """Insert a new task and return the persisted row as a dict."""
+    async def create(self, data: dict, *, user_id: int) -> dict:
+        """Insert a new task owned by user_id and return the persisted row."""
         now = _utcnow()
         task = Task(
             title=data["title"],
@@ -208,10 +224,11 @@ class TaskRepository:
             created_at=now,
             updated_at=now,
             version=1,
+            user_id=user_id,
         )
         self._db.add(task)
-        await self._db.flush()       # materialise the auto-generated id
-        await self._db.refresh(task) # reload all server-generated columns
+        await self._db.flush()
+        await self._db.refresh(task)
         return task.to_dict()
 
     async def update_raw(
@@ -219,17 +236,16 @@ class TaskRepository:
         task_id: int,
         data: dict,
         version: int,
+        *,
+        user_id: int,
     ) -> dict | str:
         """
-        Optimistic-locking UPDATE.
-
-        Only columns in _UPDATABLE_COLUMNS that are present in *data* are
-        changed.  version is always incremented; updated_at is always set.
+        Optimistic-locking UPDATE, scoped to user_id.
 
         Returns:
           - updated task dict on success
-          - NOT_FOUND  if no row with task_id exists
-          - VERSION_CONFLICT if the row exists but its version != *version*
+          - NOT_FOUND  if no row with task_id belongs to user_id
+          - VERSION_CONFLICT if the row exists (for this user) but version != *version*
         """
         now = _utcnow()
 
@@ -243,7 +259,11 @@ class TaskRepository:
 
         stmt = (
             update(Task)
-            .where(Task.id == task_id, Task.version == version)
+            .where(
+                Task.id == task_id,
+                Task.user_id == user_id,
+                Task.version == version,
+            )
             .values(**values)
             .returning(Task)
         )
@@ -253,21 +273,23 @@ class TaskRepository:
         if updated is not None:
             return updated.to_dict()
 
-        # rowcount == 0: need to distinguish 404 from 409
+        # rowcount == 0: distinguish 404 from 409 (within this user's scope)
         exists_result = await self._db.execute(
-            select(func.count()).where(Task.id == task_id)
+            select(func.count()).where(
+                Task.id == task_id, Task.user_id == user_id
+            )
         )
         exists = exists_result.scalar_one() > 0
         return VERSION_CONFLICT if exists else NOT_FOUND
 
-    async def delete(self, task_id: int) -> bool:
+    async def delete(self, task_id: int, *, user_id: int) -> bool:
         """
-        Delete the task with *task_id*.
+        Delete user_id's task with task_id.
 
-        Returns True if a row was deleted, False if it didn't exist.
+        Returns True if a row was deleted, False if it didn't exist for this user.
         """
         result = await self._db.execute(
-            select(Task).where(Task.id == task_id)
+            select(Task).where(Task.id == task_id, Task.user_id == user_id)
         )
         task = result.scalar_one_or_none()
         if task is None:

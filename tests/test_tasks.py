@@ -48,7 +48,7 @@ class TestCRUDHappyPath:
         # --- GET list (contains our task) ---
         list_resp = client.get("/tasks")
         assert list_resp.status_code == 200
-        ids = [t["id"] for t in list_resp.json()]
+        ids = [t["id"] for t in list_resp.json()["items"]]
         assert task_id in ids
 
         # --- UPDATE ---
@@ -175,7 +175,7 @@ class TestFilteringAndSorting:
 
         resp = client.get("/tasks", params={"status": "completed"})
         assert resp.status_code == 200
-        results = resp.json()
+        results = resp.json()["items"]
         assert len(results) == 1
         assert results[0]["title"] == "Beta"
 
@@ -184,7 +184,7 @@ class TestFilteringAndSorting:
 
         resp = client.get("/tasks", params={"status": "pending"})
         assert resp.status_code == 200
-        results = resp.json()
+        results = resp.json()["items"]
         assert len(results) == 1
         assert results[0]["title"] == "Alpha"
 
@@ -195,7 +195,7 @@ class TestFilteringAndSorting:
 
         resp = client.get("/tasks", params={"due_before": cutoff})
         assert resp.status_code == 200
-        results = resp.json()
+        results = resp.json()["items"]
         titles = [t["title"] for t in results]
         assert "Alpha" in titles
         assert "Gamma" not in titles
@@ -207,7 +207,7 @@ class TestFilteringAndSorting:
 
         resp = client.get("/tasks", params={"due_after": cutoff})
         assert resp.status_code == 200
-        results = resp.json()
+        results = resp.json()["items"]
         titles = [t["title"] for t in results]
         assert "Gamma" in titles
         assert "Alpha" not in titles
@@ -223,7 +223,7 @@ class TestFilteringAndSorting:
             params={"status": "completed", "due_before": cutoff},
         )
         assert resp.status_code == 200
-        results = resp.json()
+        results = resp.json()["items"]
         assert len(results) == 1
         assert results[0]["title"] == "Beta"
 
@@ -235,7 +235,7 @@ class TestFilteringAndSorting:
             params={"sort_by": "due_date", "sort_order": "asc"},
         )
         assert resp.status_code == 200
-        results = resp.json()
+        results = resp.json()["items"]
         due_dates = [t["due_date"] for t in results]
         assert due_dates == sorted(due_dates)
 
@@ -247,7 +247,7 @@ class TestFilteringAndSorting:
             params={"sort_by": "due_date", "sort_order": "desc"},
         )
         assert resp.status_code == 200
-        results = resp.json()
+        results = resp.json()["items"]
         due_dates = [t["due_date"] for t in results]
         assert due_dates == sorted(due_dates, reverse=True)
 
@@ -259,7 +259,7 @@ class TestFilteringAndSorting:
             params={"sort_by": "title", "sort_order": "asc"},
         )
         assert resp.status_code == 200
-        results = resp.json()
+        results = resp.json()["items"]
         titles = [t["title"] for t in results]
         assert titles == sorted(titles)
 
@@ -268,7 +268,9 @@ class TestFilteringAndSorting:
 
         resp = client.get("/tasks", params={"status": "cancelled"})
         assert resp.status_code == 200
-        assert resp.json() == []
+        body = resp.json()
+        assert body["items"] == []
+        assert body["total"] == 0
 
 
 # ---------------------------------------------------------------------------

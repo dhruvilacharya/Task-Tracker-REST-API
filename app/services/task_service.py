@@ -11,6 +11,8 @@ Rules for this layer:
     dispatch (Phase 6), and any other cross-cutting task logic.
 """
 
+from __future__ import annotations
+
 from datetime import date
 
 from fastapi import HTTPException
@@ -21,6 +23,7 @@ from app.repositories.task_repository import (
     VERSION_CONFLICT,
     TaskRepository,
 )
+from app.schemas.task import PaginatedResponse, TaskOut
 
 
 class TaskService:
@@ -40,11 +43,7 @@ class TaskService:
     # ------------------------------------------------------------------
 
     async def get_task(self, task_id: int) -> dict:
-        """
-        Return a task by id.
-
-        Raises 404 if not found.
-        """
+        """Return a task by id. Raises 404 if not found."""
         row = await self._repo.get_by_id(task_id)
         if row is None:
             raise HTTPException(
@@ -63,12 +62,9 @@ class TaskService:
         sort_order: str = "desc",
     ) -> list[dict]:
         """
-        Return all tasks matching the given filters in the requested order.
+        Return all matching tasks (unpaginated).
 
-        The repository handles whitelist validation for sort params; any
-        ValueError it raises becomes a 422 here (FastAPI will not reach
-        this path for invalid Literal values — it 422s before the handler
-        runs — so this is a defensive belt-and-suspenders guard).
+        Kept for internal use; the paginated variant is preferred for HTTP.
         """
         try:
             return await self._repo.get_all(
@@ -83,6 +79,52 @@ class TaskService:
                 status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=str(exc),
             ) from exc
+
+    async def list_tasks_paginated(
+        self,
+        *,
+        status: str | None = None,
+        due_before: date | None = None,
+        due_after: date | None = None,
+        sort_by: str = "created_at",
+        sort_order: str = "desc",
+        page: int = 1,
+        page_size: int = 20,
+    ) -> PaginatedResponse[TaskOut]:
+        """
+        Return a paginated envelope of tasks matching the given filters.
+
+        Issues count_all + get_all_paginated against the same filter set,
+        then assembles PaginatedResponse via its build() classmethod so
+        page-count arithmetic stays in the schema layer.
+        """
+        filter_kwargs: dict = {
+            "status": status,
+            "due_before": due_before,
+            "due_after": due_after,
+        }
+        try:
+            total = await self._repo.count_all(**filter_kwargs)
+            rows = await self._repo.get_all_paginated(
+                **filter_kwargs,
+                sort_by=sort_by,
+                sort_order=sort_order,
+                page=page,
+                page_size=page_size,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+
+        items = [TaskOut.model_validate(row) for row in rows]
+        return PaginatedResponse.build(
+            items=items,
+            total=total,
+            page=page,
+            page_size=page_size,
+        )
 
     # ------------------------------------------------------------------
     # Writes
@@ -118,11 +160,7 @@ class TaskService:
         return result  # type: ignore[return-value]  # dict at this point
 
     async def delete_task(self, task_id: int) -> None:
-        """
-        Delete a task by id.
-
-        Raises 404 if the task doesn't exist.
-        """
+        """Delete a task by id. Raises 404 if the task doesn't exist."""
         row = await self._repo.get_by_id(task_id)
         if row is None:
             raise HTTPException(

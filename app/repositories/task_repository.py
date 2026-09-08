@@ -124,6 +124,75 @@ class TaskRepository:
         result = await self._db.execute(stmt)
         return [row.to_dict() for row in result.scalars().all()]
 
+    def _apply_filters(
+        self,
+        stmt,
+        *,
+        status: str | None,
+        due_before: date | None,
+        due_after: date | None,
+    ):
+        """Apply the shared WHERE clauses used by both count_all and get_all_paginated."""
+        if status is not None:
+            stmt = stmt.where(Task.status == _to_str(status))
+        if due_before is not None:
+            stmt = stmt.where(Task.due_date <= due_before.isoformat())
+        if due_after is not None:
+            stmt = stmt.where(Task.due_date >= due_after.isoformat())
+        return stmt
+
+    async def count_all(
+        self,
+        *,
+        status: str | None = None,
+        due_before: date | None = None,
+        due_after: date | None = None,
+    ) -> int:
+        """Return the total number of tasks matching the given filters."""
+        stmt = select(func.count()).select_from(Task)
+        stmt = self._apply_filters(
+            stmt, status=status, due_before=due_before, due_after=due_after
+        )
+        result = await self._db.execute(stmt)
+        return result.scalar_one()
+
+    async def get_all_paginated(
+        self,
+        *,
+        status: str | None = None,
+        due_before: date | None = None,
+        due_after: date | None = None,
+        sort_by: str = "created_at",
+        sort_order: str = "desc",
+        page: int = 1,
+        page_size: int = 20,
+    ) -> list[dict]:
+        """
+        Return one page of tasks matching the given filters.
+
+        page is 1-indexed; page_size controls the LIMIT.
+        The same whitelist guards as get_all apply to sort_by / sort_order.
+        """
+        column_name = SORT_COLUMNS.get(sort_by)
+        if column_name is None:
+            raise ValueError(f"invalid sort_by: {sort_by!r}")
+        if sort_order not in SORT_ORDERS:
+            raise ValueError(f"invalid sort_order: {sort_order!r}")
+
+        stmt = select(Task)
+        stmt = self._apply_filters(
+            stmt, status=status, due_before=due_before, due_after=due_after
+        )
+
+        col = getattr(Task, column_name)
+        stmt = stmt.order_by(col.asc() if sort_order == "asc" else col.desc())
+
+        offset = (page - 1) * page_size
+        stmt = stmt.limit(page_size).offset(offset)
+
+        result = await self._db.execute(stmt)
+        return [row.to_dict() for row in result.scalars().all()]
+
     # ------------------------------------------------------------------
     # Write
     # ------------------------------------------------------------------
